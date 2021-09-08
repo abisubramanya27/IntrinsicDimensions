@@ -201,3 +201,31 @@ def fastfood_torched(x, DD, param_list=None, device=0):
     del BB, GG, Pi
 
     return ret
+
+def generate_matrices(param_list):
+    B_seed, Pi_seed, G_seed, divisor, LL = param_list
+    
+    # Binary scaling matrix where $B_{i,i} \in \{\pm 1 \}$ drawn iid
+    torch.manual_seed(B_seed)
+    BB = torch.FloatTensor(LL).uniform_(0, 2).type(torch.LongTensor)
+    BB = (BB * 2 - 1).type(torch.FloatTensor).to(device)
+    BB.requires_grad = False
+
+    # Random permutation matrix
+    torch.manual_seed(Pi_seed)
+    Pi = torch.LongTensor(np.random.permutation(LL)).to(device)
+    Pi.requires_grad = False
+
+    # Gaussian scaling matrix, whose elements $G_{i,i} \sim \mathcal{N}(0, 1)$
+    torch.manual_seed(G_seed)
+    GG = torch.FloatTensor(LL,).normal_().to(device)
+    GG.requires_grad = False
+    
+    divisor_tmp = torch.sqrt(LL * torch.sum(torch.pow(GG, 2)))
+    
+    print(divisor_tmp, divisor)
+    print(BB)
+    printf(Pi)
+    print(GG)
+        
+    del BB, Pi, GG
