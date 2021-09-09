@@ -45,13 +45,13 @@ class SparseWrap(nn.Module):
 
                 # If v0.size() is [4, 3], then the weight_dim is 12
                 weight_dim = np.prod(v0.size())
-                print(f'matrix_size: {matrix_size} | weight_dim: {weight_dim} | ID: {intrinsic_dimension}')
+                print(f'weight_dim: {weight_dim} | ID: {intrinsic_dimension}')
                 # Generate location and relative scale of non zero elements
                 M = SRP(weight_dim)._make_random_matrix(weight_dim, intrinsic_dimension)
-                fm=find(M)
+                fm = find(M)
                 
                 # Create sparse projection matrix from small vv to full theta space
-                proj_matrix = torch.sparse_coo_tensor([fm[0],fm[1]], fm[2], (weight_dim, intrinsic_dimension))
+                proj_matrix = torch.sparse_coo_tensor(indices=[fm[0],fm[1]], values=fm[2], size=(weight_dim, intrinsic_dimension))
                 
                 # Generates random projection matrices P, sets them to no grad
                 self.random_matrix[name] = (
