@@ -43,8 +43,7 @@ class SparseWrap(nn.Module):
                     param.clone().detach().requires_grad_(False).to(device)
                 )
 
-                # If v0.size() is [4, 3], then below operation makes it [4, 3, v_size]
-                matrix_size = v0.size() + v_size
+                # If v0.size() is [4, 3], then the weight_dim is 12
                 weight_dim = np.prod(v0.size())
                 print(f'matrix_size: {matrix_size} | weight_dim: {weight_dim} | ID: {intrinsic_dimension}')
                 # Generate location and relative scale of non zero elements
@@ -52,7 +51,7 @@ class SparseWrap(nn.Module):
                 fm=find(M)
                 
                 # Create sparse projection matrix from small vv to full theta space
-                proj_matrix = torch.sparse_coo_tensor(np.array([fm[0],fm[1]]).T, fm[2], (weight_dim, intrinsic_dimension)).view(matrix_size)
+                proj_matrix = torch.sparse_coo_tensor([fm[0],fm[1]], fm[2], (weight_dim, intrinsic_dimension))
                 
                 # Generates random projection matrices P, sets them to no grad
                 self.random_matrix[name] = (
@@ -75,10 +74,10 @@ class SparseWrap(nn.Module):
         for name, base, localname in self.name_base_localname:
 
             # Product between matrix P and \theta^{d}
-            ray = torch.sparse.mm(self.random_matrix[name], self.V.to_dense())
+            ray = torch.sparse.mm(self.random_matrix[name], self.V)
 
             # Add the \theta_{0}^{D} to P \dot \theta^{d}
-            param = self.initial_value[name] + torch.squeeze(ray, -1)
+            param = self.initial_value[name] + ray.view(self.initial_value[name].size())
 
             setattr(base, localname, param)
 
