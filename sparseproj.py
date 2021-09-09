@@ -45,7 +45,6 @@ class SparseWrap(nn.Module):
 
                 # If v0.size() is [4, 3], then the weight_dim is 12
                 weight_dim = np.prod(v0.size())
-                print(f'weight_dim: {weight_dim} | ID: {intrinsic_dimension}')
                 # Generate location and relative scale of non zero elements
                 M = SRP(weight_dim)._make_random_matrix(weight_dim, intrinsic_dimension)
                 fm = find(M)
@@ -55,14 +54,13 @@ class SparseWrap(nn.Module):
                 
                 # Generates random projection matrices P, sets them to no grad
                 self.random_matrix[name] = (
-                    proj_matrix.requires_grad_(False).to(device)
+                    proj_matrix.float().requires_grad_(False).to(device)
                 )
 
                 # NOTE!: lines below are not clear!
                 base, localname = module, name
                 while "." in localname:
                     prefix, localname = localname.split(".", 1)
-                    print(f'localname: {localname} | prefix: {prefix}')
                     base = base.__getattr__(prefix)
                 self.name_base_localname.append((name, base, localname))
 
