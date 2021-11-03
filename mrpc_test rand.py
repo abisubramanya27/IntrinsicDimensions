@@ -62,7 +62,8 @@ class FastfoodWrap(nn.Module):
 
         # Parameter vector that is updated
         # Initialised with zeros as per text: \theta^{d}
-        intrinsic_parameter = nn.Parameter(torch.zeros((intrinsic_dimension)).to(device))
+        intrinsic_parameter = torch.FloatTensor(intrinsic_dimension).to(device)
+        intrinsic_parameter = nn.Parameter(nn.init.normal_(intrinsic_parameter, std=1/(intrinsic_dimension ** 0.5)))
         self.register_parameter("intrinsic_parameter", intrinsic_parameter)
         v_size = (intrinsic_dimension,)
 
@@ -355,13 +356,15 @@ class ModelBoi(nn.Module):
 
 
 # Training Loop
-def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device, log_interval=50):
+def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device, log_interval=50, wandb_log=False):
     model.train()
 
     train_loss = 0
     n_correct = 0
     train_start_time = time.time()
     n_samples = 0
+    batch_train_loss = 0
+    batch_samples = 0
 
     for batch_idx, batch in enumerate(train_dataloader):
 
@@ -378,15 +381,24 @@ def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device
         n_correct += pred.eq(labels.view_as(pred)).sum().item()
         train_loss += loss.item() * len(inputs)
         n_samples += len(inputs)
+        batch_train_loss += loss.item() * len(inputs)
+        batch_samples += len(inputs)
 
         if (batch_idx+1)%log_interval == 0:
-            print(f"Batch Number: {batch_idx}\t\t Current Loss: {loss.item()}")
+            # print(f"Batch Number: {batch_idx+1}\t\t Current Loss: {loss.item()}")
+            if wandb_log and batch_samples > 0:
+                wandb.log({"train_loss_step": batch_train_loss/batch_samples})
+                batch_samples = 0
+                batch_train_loss = 0
 
         if scheduler:
             scheduler.step()
     
     train_loss /= n_samples
     train_acc = n_correct*100.0 / n_samples
+
+    if wandb_log and batch_samples > 0:
+        wandb.log({"train_loss_step": batch_train_loss/batch_samples})
 
     return train_loss, train_acc
 
@@ -429,9 +441,16 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'mode': 'DID'
+            'mode': 'DID',
+            'lr_scheduler': 'linear',
+            'warmup_steps': 200,
+            'optim': 'Adam',
+            'beta1': 0.9,
+            'beta2': 0.999,
+            'weight_decay': 0.01,
+            'eps': 1e-6
         }
-        run = wandb.init(reinit=True, config=config, project='mrpc_roberta', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project='mrpc-256-rand-linear', entity='iitm-id', name=run_name, resume=None)
 
 
     # torch.set_default_tensor_type('torch.FloatTensor')
@@ -441,16 +460,16 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
-    optimizer = AdamW(model.parameters(), lr=LR, betas = (0.9,0.98), weight_decay=0.1, eps=1e-06)
+    optimizer = AdamW(model.parameters(), lr=LR, betas = (0.9,0.999), weight_decay=0.01, eps=1e-06)
 
     # Callbacks
-    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=1e-5)
+    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=0)
 
     num_training_steps = NUM_EPOCHS * len(db.train_dataloader)
     lr_scheduler = get_scheduler(
-        "polynomial",
+        "linear",
         optimizer=optimizer,
-        num_warmup_steps=num_training_steps//10,
+        num_warmup_steps=200,
         num_training_steps=num_training_steps
     )
 
@@ -459,7 +478,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
         epoch_time = time.time()
-        train_loss, train_acc = train_loop_fn(model, db.train_dataloader, optimizer, lr_scheduler, loss_fn, device, 100)
+        train_loss, train_acc = train_loop_fn(model, db.train_dataloader, optimizer, lr_scheduler, loss_fn, device, 10, wandb_log)
 
         eval_time = time.time()
         print(f"\n[{round(eval_time-epoch_time,4)}s] Epoch elapsed: {epoch+1}\t\t Train Loss: {train_loss}\t\t Train Accuracy: {train_acc:.2f}%")
@@ -494,20 +513,48 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     return
 
 # Config
-MODEL_NAME = "roberta-base" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
+MODEL_NAME = "bert-base-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 2
 DATASET = "glue"
 CONFIG = "mrpc"
 ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
-BATCH_SIZE = 32
+BATCH_SIZE = 80
 NUM_EPOCHS = 10
-MAX_LENGTH = 512
+MAX_LENGTH = 256
 LR = 1e-5
 FREEZE_FRACTION = 0
 
-for ID in [0] + list(np.logspace(2.75, 4, 15)):
-    for LR in [5e-3, 5e-4, 5e-5]:
+ID_lr_dict = {
+    562: 5e-3,
+    690: 2e-3,
+    848: 2e-3,
+    1041: 5e-3,
+    1279: 2e-3,
+    1571: 5e-3,
+    1930: 2e-3,
+    2371: 5e-3,
+    2912: 5.5e-3,
+    3577: 5e-3,
+    4393: 5e-3,
+    5396: 4.75e-3,
+    6628: 4e-3,
+    8141: 5e-3,
+    10000: 6e-3,
+    12915: 4.5e-3,
+    16681: 2e-3,
+    21544: 4.5e-3,
+    27825: 5.5e-3,
+    35938: 2e-3,
+    46415: 2e-3,
+    59948: 4e-3,
+    77426: 5e-3,
+    100000: 2e-3
+}
+
+for ID in [0, 0]:
+    for LR in [5e-5, 1e-5, 2.5e-5, 3e-5, 4.5e-5, 3.5e-5]: #[5e-3, 4.75e-3, 5.25e-3, 3.5e-3]:
+    #if ID in [2912, 12915, 16681, 59948, 77426, 100000]:
         main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
                 LR, int(ID), wandb_log=True, output_dir=None)

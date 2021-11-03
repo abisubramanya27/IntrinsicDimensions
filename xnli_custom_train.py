@@ -4,6 +4,7 @@ import time
 import sys
 import wandb
 import numpy as np
+import math
 import torch
 import datasets
 from torch.utils.data import DataLoader
@@ -280,9 +281,9 @@ class DatasetBoi:
         data = datasets.load_dataset(self.DATASET, self.CONFIG)
         print(data)
         train_dataset = data['train'].select(range(self.NUM_TRAIN_SAMPLES)) if self.NUM_TRAIN_SAMPLES > 0 else data['train']
-        print('Training data length:', len(train_dataset['label']))
+        print('Training data length:', len(train_dataset))
         eval_dataset = data['validation'].select(range(self.NUM_EVAL_SAMPLES)) if self.NUM_EVAL_SAMPLES > 0 else data['validation']
-        print('Validation data length:', len(eval_dataset['label']))
+        print('Validation data length:', len(eval_dataset))
 
         return train_dataset, eval_dataset
 
@@ -298,13 +299,13 @@ class DatasetBoi:
 
     def get_dataloaders(self):
         # Dataloades
-        train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=1, drop_last=True)
-        eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=1, drop_last=True)
+        train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=True)
+        eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=True)
 
         return train_dataloader, eval_dataloader
 
     def _tokenize(self, batch):
-        return self.tokenizer(batch['sentence1'], batch['sentence2'], padding='max_length', truncation=True, max_length=self.MAX_LENGTH)
+        return self.tokenizer(batch['premise'], batch['hypothesis'], padding='max_length', truncation=True, max_length=self.MAX_LENGTH)
     
     def _format_input(self, dataset):
         dataset.set_format(type='torch', columns=['input_ids','label']) # Currently attention_mask and token_type_ids is being removed as fastfoodwrap accept>
@@ -355,13 +356,15 @@ class ModelBoi(nn.Module):
 
 
 # Training Loop
-def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device, log_interval=50):
+def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device, log_interval=50, wandb_log=False):
     model.train()
 
     train_loss = 0
     n_correct = 0
     train_start_time = time.time()
     n_samples = 0
+    batch_train_loss = 0
+    batch_samples = 0
 
     for batch_idx, batch in enumerate(train_dataloader):
 
@@ -378,15 +381,24 @@ def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device
         n_correct += pred.eq(labels.view_as(pred)).sum().item()
         train_loss += loss.item() * len(inputs)
         n_samples += len(inputs)
+        batch_train_loss += loss.item() * len(inputs)
+        batch_samples += len(inputs)
 
         if (batch_idx+1)%log_interval == 0:
-            print(f"Batch Number: {batch_idx}\t\t Current Loss: {loss.item()}")
+            # print(f"Batch Number: {batch_idx+1}\t\t Current Loss: {loss.item()}")
+            if wandb_log and batch_samples > 0:
+                wandb.log({"train_loss_step": batch_train_loss/batch_samples})
+                batch_samples = 0
+                batch_train_loss = 0
 
         if scheduler:
             scheduler.step()
     
     train_loss /= n_samples
     train_acc = n_correct*100.0 / n_samples
+
+    if wandb_log and batch_samples > 0:
+        wandb.log({"train_loss_step": batch_train_loss/batch_samples})
 
     return train_loss, train_acc
 
@@ -421,18 +433,9 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
             LR, ID=0, wandb_log=True, output_dir=None):
     run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}" if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
-    if wandb_log:
-        config = {
-            'model_name': MODEL_NAME,
-            'dataset': DATASET + '/' + CONFIG,
-            'batch_size': BATCH_SIZE,
-            'max_length': MAX_LENGTH,
-            'lr': LR,
-            'ID': ID,
-            'mode': 'DID'
-        }
-        run = wandb.init(reinit=True, config=config, project='mrpc_roberta', entity='iitm-id', name=run_name, resume=None)
-
+    beta1, beta2 = 0.9, 0.999
+    weight_decay, eps = 0.01, 1e-8
+    scheduler_type = 'linear'
 
     # torch.set_default_tensor_type('torch.FloatTensor')
     device = torch.device('cuda')
@@ -441,25 +444,45 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
-    optimizer = AdamW(model.parameters(), lr=LR, betas = (0.9,0.98), weight_decay=0.1, eps=1e-06)
+    optimizer = AdamW(model.parameters(), lr=LR, betas = (beta1,beta2), weight_decay=weight_decay, eps=eps)
 
     # Callbacks
-    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=1e-5)
+    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=0)
 
+    warmup_steps = math.ceil(len(db.train_dataloader) * NUM_EPOCHS * 0.1)
     num_training_steps = NUM_EPOCHS * len(db.train_dataloader)
     lr_scheduler = get_scheduler(
-        "polynomial",
+        scheduler_type,
         optimizer=optimizer,
-        num_warmup_steps=num_training_steps//10,
+        num_warmup_steps=warmup_steps,
         num_training_steps=num_training_steps
     )
 
     loss_fn = torch.nn.CrossEntropyLoss()
 
+    if wandb_log:
+        config = {
+            'model_name': MODEL_NAME,
+            'dataset': DATASET + '/' + CONFIG,
+            'batch_size': BATCH_SIZE,
+            'max_length': MAX_LENGTH,
+            'lr': LR,
+            'ID': ID,
+            'mode': 'DID',
+            'lr_scheduler': scheduler_type,
+            'warmup_steps': warmup_steps,
+            'optim': 'Adam',
+            'beta1': beta1,
+            'beta2': beta2,
+            'weight_decay': weight_decay,
+            'eps': eps
+        }
+        run = wandb.init(reinit=True, config=config, project='xnli-ar-256', entity='iitm-id', name=run_name, resume=None)
+
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
         epoch_time = time.time()
-        train_loss, train_acc = train_loop_fn(model, db.train_dataloader, optimizer, lr_scheduler, loss_fn, device, 100)
+        train_loss, train_acc = train_loop_fn(model, db.train_dataloader, optimizer, lr_scheduler, loss_fn, device, 100, wandb_log)
 
         eval_time = time.time()
         print(f"\n[{round(eval_time-epoch_time,4)}s] Epoch elapsed: {epoch+1}\t\t Train Loss: {train_loss}\t\t Train Accuracy: {train_acc:.2f}%")
@@ -494,20 +517,48 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     return
 
 # Config
-MODEL_NAME = "roberta-base" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
-NUM_LABELS = 2
-DATASET = "glue"
-CONFIG = "mrpc"
+MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
+NUM_LABELS = 3
+DATASET = "xnli"
+CONFIG = "ar"
 ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
-BATCH_SIZE = 32
-NUM_EPOCHS = 10
-MAX_LENGTH = 512
+BATCH_SIZE = 80
+NUM_EPOCHS = 3
+MAX_LENGTH = 256
 LR = 1e-5
 FREEZE_FRACTION = 0
 
-for ID in [0] + list(np.logspace(2.75, 4, 15)):
-    for LR in [5e-3, 5e-4, 5e-5]:
+ID_lr_dict = {
+    562: 5e-3,
+    690: 2e-3,
+    848: 2e-3,
+    1041: 5e-3,
+    1279: 2e-3,
+    1571: 5e-3,
+    1930: 2e-3,
+    2371: 5e-3,
+    2912: 5.5e-3,
+    3577: 5e-3,
+    4393: 5e-3,
+    5396: 4.75e-3,
+    6628: 4e-3,
+    8141: 5e-3,
+    10000: 6e-3,
+    12915: 4.5e-3,
+    16681: 2e-3,
+    21544: 4.5e-3,
+    27825: 5.5e-3,
+    35938: 2e-3,
+    46415: 2e-3,
+    59948: 4e-3,
+    77426: 5e-3,
+    100000: 2e-3
+}
+
+for ID in list(np.logspace(3.3, 5, 6))[1:]:
+    for LR in [1e-3]: #[5e-3, 4.75e-3, 5.25e-3, 3.5e-3]:
+    #if ID in [2912, 12915, 16681, 59948, 77426, 100000]:
         main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
                 LR, int(ID), wandb_log=True, output_dir=None)
