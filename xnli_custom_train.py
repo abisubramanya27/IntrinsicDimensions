@@ -262,7 +262,7 @@ def fastfood_torched(x, DD, param_list=None, device=0):
 
 # Data
 class DatasetBoi:
-    def __init__(self, DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES=-1, NUM_EVAL_SAMPLES=-1):
+    def __init__(self, DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES=-1, NUM_EVAL_SAMPLES=-1,  NUM_TEST_SAMPLES=-1):
         self.DATASET = DATASET
         self.CONFIG = CONFIG
         self.MODEL_NAME = MODEL_NAME
@@ -270,11 +270,12 @@ class DatasetBoi:
         self.MAX_LENGTH = MAX_LENGTH
         self.NUM_TRAIN_SAMPLES = NUM_TRAIN_SAMPLES
         self.NUM_EVAL_SAMPLES = NUM_EVAL_SAMPLES
+        self.NUM_TEST_SAMPLES = NUM_TEST_SAMPLES
 
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.train_dataset, self.eval_dataset = self.download_data()
-        self.train_dataset, self.eval_dataset = self.preprocess_data()
-        self.train_dataloader, self.eval_dataloader = self.get_dataloaders()
+        self.train_dataset, self.eval_dataset, self.test_dataset = self.download_data()
+        self.train_dataset, self.eval_dataset, self.test_dataset = self.preprocess_data()
+        self.train_dataloader, self.eval_dataloader, self.test_dataloader = self.get_dataloaders()
 
     def download_data(self):
         # Download data
@@ -284,25 +285,30 @@ class DatasetBoi:
         print('Training data length:', len(train_dataset))
         eval_dataset = data['validation'].select(range(self.NUM_EVAL_SAMPLES)) if self.NUM_EVAL_SAMPLES > 0 else data['validation']
         print('Validation data length:', len(eval_dataset))
+        test_dataset = data['test'].select(range(self.NUM_TEST_SAMPLES)) if self.NUM_TEST_SAMPLES > 0 else data['test']
+        print('Test data length:', len(test_dataset))
 
-        return train_dataset, eval_dataset
+        return train_dataset, eval_dataset, test_dataset
 
     def preprocess_data(self):
         # Preprocessing
         train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
         eval_dataset = self.eval_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+        test_dataset = self.test_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
         train_dataset = self._format_input(train_dataset)
         eval_dataset = self._format_input(eval_dataset)
+        test_dataset = self._format_input(test_dataset)
 
-        return train_dataset, eval_dataset
+        return train_dataset, eval_dataset, test_dataset
 
 
     def get_dataloaders(self):
         # Dataloades
-        train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=True)
-        eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=True)
+        train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
+        eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
+        test_dataloader = DataLoader(self.test_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
 
-        return train_dataloader, eval_dataloader
+        return train_dataloader, eval_dataloader, test_dataloader
 
     def _tokenize(self, batch):
         return self.tokenizer(batch['premise'], batch['hypothesis'], padding='max_length', truncation=True, max_length=self.MAX_LENGTH)
@@ -314,7 +320,7 @@ class DatasetBoi:
 
 # Model
 class ModelBoi(nn.Module):
-    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device):
+    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said):
         super(ModelBoi,self).__init__()
         self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=NUM_LABELS, output_loading_info=False)
         print("Before Freezing- ")
@@ -324,7 +330,7 @@ class ModelBoi(nn.Module):
         trainable_params, layers = self.trainable_stats()
         self.model.to(device)
         if ID:
-            self.model = FastfoodWrap(self.model, intrinsic_dimension=ID, said=False, device=device)
+            self.model = FastfoodWrap(self.model, intrinsic_dimension=ID, said=said, device=device)
             # self.model = intrinsic_dimension(self.model, ID, set())
             print("After fastfood - ")
             trainable_params, layers = self.trainable_stats()
@@ -431,8 +437,9 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 
 # Main Function
 def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            LR, ID=0, wandb_log=True, output_dir=None):
-    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}" if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
+            LR, ID=0, said=False, wandb_log=True, output_dir=None):
+    said_str = "_SAID" if said else ''
+    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
     beta1, beta2 = 0.9, 0.999
     weight_decay, eps = 0.01, 1e-8
     scheduler_type = 'linear'
@@ -440,7 +447,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     # torch.set_default_tensor_type('torch.FloatTensor')
     device = torch.device('cuda')
     db = DatasetBoi(DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
-    model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device)
+    model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
@@ -468,7 +475,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'mode': 'DID',
+            'mode': 'DID' if not said else 'SAID',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
             'optim': 'Adam',
@@ -477,7 +484,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'weight_decay': weight_decay,
             'eps': eps
         }
-        run = wandb.init(reinit=True, config=config, project='xnli-ar-256', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'xnli-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
@@ -488,8 +495,10 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         print(f"\n[{round(eval_time-epoch_time,4)}s] Epoch elapsed: {epoch+1}\t\t Train Loss: {train_loss}\t\t Train Accuracy: {train_acc:.2f}%")
         
         eval_loss, eval_acc, early_stop = eval_loop_fn(model, db.eval_dataloader, device, loss_fn, early_stop_callback)
+        test_loss, test_acc, early_stop = eval_loop_fn(model, db.test_dataloader, device, loss_fn, early_stop_callback)
+
         if wandb_log:
-            wandb.log({"Train Loss": train_loss, "Train Accuracy": train_acc, "Eval Loss": eval_loss, "Eval Accuracy": eval_acc})
+            wandb.log({"Train Loss": train_loss, "Train Accuracy": train_acc, "Eval Loss": eval_loss, "Eval Accuracy": eval_acc, "Test Loss":test_loss, "Test Accuracy":test_acc})
 
         print(f"[{round(time.time()-eval_time,4)}s] Epoch elapsed: {epoch+1}\t\t Eval Loss: {eval_loss}\t\t Eval Accuracy: {eval_acc:.2f}%")
 
@@ -505,7 +514,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             }, output_path)
             if wandb_log:
                 artifact = wandb.Artifact(run_name, type='model')
-                artifact.add_file(output_path)
+                artifact.add_file(output_path, name=f'epoch:{epoch+1}')
                 run.log_artifact(artifact)
         
         if early_stop:
@@ -517,48 +526,36 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     return
 
 # Config
-MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
+MODEL_NAME = "xlm-mlm-xnli15-1024" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "ar"
+CONFIG = "en"
 ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
 BATCH_SIZE = 80
 NUM_EPOCHS = 3
-MAX_LENGTH = 256
+MAX_LENGTH = 256 # only 0.2 % of samples are > 256 size
 LR = 1e-5
 FREEZE_FRACTION = 0
 
 ID_lr_dict = {
-    562: 5e-3,
-    690: 2e-3,
-    848: 2e-3,
-    1041: 5e-3,
-    1279: 2e-3,
-    1571: 5e-3,
-    1930: 2e-3,
-    2371: 5e-3,
-    2912: 5.5e-3,
-    3577: 5e-3,
-    4393: 5e-3,
-    5396: 4.75e-3,
-    6628: 4e-3,
-    8141: 5e-3,
-    10000: 6e-3,
-    12915: 4.5e-3,
-    16681: 2e-3,
-    21544: 4.5e-3,
-    27825: 5.5e-3,
-    35938: 2e-3,
-    46415: 2e-3,
-    59948: 4e-3,
-    77426: 5e-3,
-    100000: 2e-3
+    0: 3e-5,
+    100: 5e-3,
+    500: 2e-3,
+    1000: 1e-3,
+    2000: 1e-3,
+    5000: 1e-3,
+    10000: 1e-3,
+    20000: 1e-3,
+    35000: 1e-3,
+    50000: 1e-3,
+    75000: 1e-3,
+    100000: 1e-3,
+    200000: 5e-4,
+    500000: 2e-4
 }
 
-for ID in list(np.logspace(3.3, 5, 6))[1:]:
-    for LR in [1e-3]: #[5e-3, 4.75e-3, 5.25e-3, 3.5e-3]:
-    #if ID in [2912, 12915, 16681, 59948, 77426, 100000]:
-        main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-                LR, int(ID), wandb_log=True, output_dir=None)
+for ID in sorted(ID_lr_dict.keys()):
+    main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
+                ID_lr_dict[ID], int(ID), said=True, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_xnli/")
