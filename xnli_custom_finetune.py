@@ -436,10 +436,10 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
     return eval_loss, eval_acc, False
 
 # Main Function
-def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
+def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
             LR, ID=0, said=False, wandb_log=True, output_dir=None):
     said_str = "_SAID" if said else ''
-    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
+    run_name = f"{MODEL_NAME}_hi_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_hi_baseline_lr{LR}_ml{MAX_LENGTH}"
     beta1, beta2 = 0.9, 0.999
     weight_decay, eps = 0.01, 1e-8
     scheduler_type = 'linear'
@@ -447,7 +447,9 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     # torch.set_default_tensor_type('torch.FloatTensor')
     device = torch.device('cuda')
     db = DatasetBoi(DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
-    model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
+    # model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
+    checkpoint = torch.load(os.path.join(MODEL_PATH))
+    model = checkpoint['model_state_dict']
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
@@ -470,12 +472,13 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     if wandb_log:
         config = {
             'model_name': MODEL_NAME,
-            'dataset': DATASET + '/' + CONFIG,
+            'dataset': DATASET,
             'batch_size': BATCH_SIZE,
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'mode': 'DID' if not said else 'SAID',
+            'finetuned_on': "hi",
+            'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
             'optim': 'Adam',
@@ -484,7 +487,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'weight_decay': weight_decay,
             'eps': eps
         }
-        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
     prev_val_acc, prev_epoch = -1, -1
     train_start = time.time()
@@ -537,15 +540,15 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
 # Config
 MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
-DATASET = "xnli"
-CONFIG = "ar"
-ID = 100
+DATASET = "snli"
+CONFIG = "en"
+ID = 0
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
 BATCH_SIZE = 80
 NUM_EPOCHS = 3
 MAX_LENGTH = 256 # only 0.2 % of samples are > 256 size
-LR = 1e-5
+LR = 2e-5
 FREEZE_FRACTION = 0
 
 ID_lr_dict = {
@@ -568,6 +571,7 @@ ID_lr_dict = {
     # 500000: 2e-4
 }
 
-for ID in sorted(ID_lr_dict.keys()):
-    main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_xnli_tmp/")
+for LR in [1e-5, 2e-5, 3e-5]:
+    main_fn(MODEL_NAME, "/home/indic-analysis/container/checkpoints_mbert_xnli_hi/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth",
+            DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
+            LR, int(ID), said=False, wandb_log=True, output_dir=None)
