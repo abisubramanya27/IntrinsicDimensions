@@ -320,9 +320,12 @@ class DatasetBoi:
 
 # Model
 class ModelBoi(nn.Module):
-    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said):
+    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, model=None):
         super(ModelBoi,self).__init__()
-        self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=NUM_LABELS, output_loading_info=False)
+        if model is None:
+            self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=NUM_LABELS, output_loading_info=False)
+        else:
+            self.model = model.model
         print("Before Freezing- ")
         trainable_params, layers = self.trainable_stats()
         print("After Freezing- ")
@@ -409,7 +412,7 @@ def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device
     return train_loss, train_acc
 
 # Eval Loop
-def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
+def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback=None):
     model.eval()
     eval_loss = 0
     num_correct = 0
@@ -427,17 +430,18 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 
     eval_loss /= n_samples
     eval_acc = num_correct*100 / n_samples
-    early_stop_callback(eval_loss, model)
-
-    if early_stop_callback.early_stop:
-        print("Early stopping")
-        return eval_loss, eval_acc, True
+    
+    if early_stop_callback:
+        early_stop_callback(eval_loss, model)
+        if early_stop_callback.early_stop:
+            print("Early stopping")
+            return eval_loss, eval_acc, True
 
     return eval_loss, eval_acc, False
 
 # Main Function
 def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            LR, ID=0, said=False, wandb_log=True, output_dir=None):
+            LR, ID=0, said=False, wandb_log=True, output_dir=None, MODEL_PATH=None):
     said_str = "_SAID" if said else ''
     run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
     beta1, beta2 = 0.9, 0.999
@@ -447,14 +451,20 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     # torch.set_default_tensor_type('torch.FloatTensor')
     device = torch.device('cuda')
     db = DatasetBoi(DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
-    model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
+    if MODEL_PATH is not None:
+        checkpoint = torch.load(MODEL_PATH)
+        model = checkpoint['model_state_dict']
+        if ID > 0:
+            model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, model)
+    else:
+        model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
     optimizer = AdamW(model.parameters(), lr=LR, betas = (beta1,beta2), weight_decay=weight_decay, eps=eps)
 
     # Callbacks
-    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=0)
+    early_stop_callback = EarlyStopping.EarlyStopping(patience=2,delta=0)
 
     warmup_steps = math.ceil(len(db.train_dataloader) * NUM_EPOCHS * 0.1)
     num_training_steps = NUM_EPOCHS * len(db.train_dataloader)
@@ -475,7 +485,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'mode': 'DID' if not said else 'SAID',
+            'finetuned_on': 'en',
+            'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
             'optim': 'Adam',
@@ -484,7 +495,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'weight_decay': weight_decay,
             'eps': eps
         }
-        run = wandb.init(reinit=True, config=config, project=f'bert-base-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
     prev_val_loss, prev_epoch = 100000, -1
     train_start = time.time()
@@ -498,7 +509,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         eval_loss, eval_acc, early_stop = eval_loop_fn(model, db.eval_dataloader, device, loss_fn, early_stop_callback)
         print(f"[{round(time.time()-eval_time,4)}s] Epoch elapsed: {epoch+1}\t\t Eval Loss: {eval_loss}\t\t Eval Accuracy: {eval_acc:.2f}%")
 
-        test_loss, test_acc, early_stop = eval_loop_fn(model, db.test_dataloader, device, loss_fn, early_stop_callback)
+        test_loss, test_acc, early_stop = eval_loop_fn(model, db.test_dataloader, device, loss_fn, None)
         print(f"[{round(time.time()-eval_time,4)}s] Epoch elapsed: {epoch+1}\t\t Test Loss: {test_loss}\t\t Test Accuracy: {test_acc:.2f}%")
 
         if wandb_log:
@@ -531,6 +542,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         artifact = wandb.Artifact(run_name, type='model')
         artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
         run.log_artifact(artifact)
+        if os.path.exists(output_path):
+            os.remove(output_path)
 
     del model
     torch.cuda.empty_cache()
@@ -538,11 +551,11 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     return
 
 # Config
-MODEL_NAME = "bert-base-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
+MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "hi"
-ID = 100
+CONFIG = "de"
+ID = 0
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
 BATCH_SIZE = 80
@@ -551,26 +564,50 @@ MAX_LENGTH = 256 # only 0.2 % of samples are > 256 size
 LR = 1e-5
 FREEZE_FRACTION = 0
 
+# For finetuning after xnli finetuning
+# ID_lr_dict = {
+#     # 0: 1e-5,
+#     50: 8e-4,
+#     # 100: 8e-4,
+#     # 500: 8e-4,
+#     # 1000: 8e-4,
+#     # 2000: 8e-4,
+#     # 5000: 8e-4,
+#     # 10000: 8e-4,
+#     # 12000: 8e-4,
+#     # 15000: 8e-4,
+#     # 18000: 8e-4,
+#     # 20000: 8e-4,
+#     # 35000: 8e-4,
+#     # 50000: 8e-4,
+#     # 75000: 8e-4,
+#     # 100000: 8e-4,
+#     # 200000: 4e-5,
+#     # 500000: 2e-5
+# }
+
+# For mbert finetuning on xnli
 ID_lr_dict = {
-    0: 3e-5,
+    # 0: 3e-5,
     # 100: 1e-3,
     # 500: 1e-3,
-    1000: 1e-3,
+    # 1000: 1e-3,
     # 2000: 1e-3,
     # 5000: 1e-3,
-    10000: 1e-3,
+    # 10000: 1e-3,
     # 12000: 1e-3,
     # 15000: 1e-3,
     # 18000: 1e-3,
-    20000: 1e-3,
+    # 20000: 1e-3,
     # 35000: 1e-3,
     # 50000: 1e-3,
     # 75000: 1e-3,
-    100000: 1e-3,
+    # 100000: 1e-3,
     # 200000: 5e-4,
-    # 500000: 2e-4
+    500000: 2e-4
 }
 
 for ID in sorted(ID_lr_dict.keys()):
     main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_xnli_de/")
+            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_en_xnli_de/",
+            MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
