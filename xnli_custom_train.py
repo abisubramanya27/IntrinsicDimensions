@@ -484,9 +484,9 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'weight_decay': weight_decay,
             'eps': eps
         }
-        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'bert-base-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
-    prev_val_acc, prev_epoch = -1, -1
+    prev_val_loss, prev_epoch = 100000, -1
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
         epoch_time = time.time()
@@ -506,8 +506,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
 
         print(f"Total time taken for epoch {epoch+1}: {round(time.time()-epoch_time,4)}s\n")
 
-        if output_dir!=None and eval_acc > prev_val_acc:
-            prev_val_acc = eval_acc
+        if output_dir!=None and eval_loss < prev_val_loss:
+            prev_val_loss = eval_loss
             output_path = os.path.join(output_dir, run_name)
             if not os.path.exists(output_path):
                 os.makedirs(output_path)
@@ -521,13 +521,16 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
                 'scheduler_state_dict': lr_scheduler.state_dict(),
                 'epoch': epoch+1
             }, output_path)
-            if wandb_log:
-                artifact = wandb.Artifact(run_name, type='model')
-                artifact.add_file(output_path, name=f'epoch_{epoch+1}.pth')
-                run.log_artifact(artifact)
         
         if early_stop:
             break
+    
+    if output_dir!=None and wandb_log:
+        output_path = os.path.join(output_dir, run_name)
+        output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
+        artifact = wandb.Artifact(run_name, type='model')
+        artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
+        run.log_artifact(artifact)
 
     del model
     torch.cuda.empty_cache()
@@ -535,10 +538,10 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     return
 
 # Config
-MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
+MODEL_NAME = "bert-base-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "ar"
+CONFIG = "hi"
 ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
@@ -549,25 +552,25 @@ LR = 1e-5
 FREEZE_FRACTION = 0
 
 ID_lr_dict = {
-    # 0: 3e-5,
+    0: 3e-5,
     # 100: 1e-3,
     # 500: 1e-3,
-    # 1000: 1e-3,
+    1000: 1e-3,
     # 2000: 1e-3,
     # 5000: 1e-3,
-    # 10000: 1e-3,
+    10000: 1e-3,
     # 12000: 1e-3,
     # 15000: 1e-3,
     # 18000: 1e-3,
-    # 20000: 1e-3,
+    20000: 1e-3,
     # 35000: 1e-3,
-    50000: 1e-3,
+    # 50000: 1e-3,
     # 75000: 1e-3,
-    # 100000: 1e-3,
+    100000: 1e-3,
     # 200000: 5e-4,
     # 500000: 2e-4
 }
 
 for ID in sorted(ID_lr_dict.keys()):
     main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_xnli_tmp/")
+            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_xnli_de/")

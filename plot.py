@@ -17,22 +17,58 @@ Plot for Ideal Pruning fraction identification
 '''
 Plot for correlation between ID and Corpus size
 '''
-ID = {
-    'en': 25000,
+ID_3 = {
+    'en': 22000,
+    # 'ar': 12000,
+    # 'bg': 18000,
+    'de': 17000,
+    # 'el': 25000,
+    'es': 17000,
+    'fr': 14500,
+    # 'hi': 7000,
+    # 'ru': 10000,
+    # 'sw': 46000,
+    # 'th': 150000,
+    # 'tr': 19000,
+    # 'ur': 6500,
+    # 'vi': 13000,
+    # 'zh': 13500
+}
+
+ID_2 = {
+    'en': 36000,
     'ar': 12000,
     'bg': 18000,
-    'de': 18000,
-    'el': 19000,
-    'es': 17000,
+    'de': 11000,
+    'el': 25000,
+    'es': 14000,
     'fr': 15000,
-    'hi': 7000,
-    'ru': 18000,
-    # 'sw': 45000,
-    # 'th': 150000,
-    'tr': 19000,
-    'ur': 6000,
-    'vi': 13000,
-    'zh': 13000
+    'hi': 11000,
+    'ru': 16000,
+    'sw': 40000,
+    'th': 500000,
+    'tr': 21000,
+    'ur': 6500,
+    'vi': 12700,
+    'zh': 13500
+}
+
+ID_1 = {
+    'en': 18000,
+    'ar': 12000,
+    'bg': 15000,
+    'de': 12000,
+    'el': 15000,
+    'es': 14000,
+    'fr': 16000,
+    'hi': 4000,
+    'ru': 14000,
+    'sw': 41000,
+    'th': 150000,
+    'tr': 14500,
+    'ur': 4000,
+    'vi': 12000,
+    'zh': 14500
 }
 
 corpus = {
@@ -63,8 +99,8 @@ baselines = {
     'fr': 73.613,
     'hi': 60.12,
     'ru': 67.944,
-    # 'sw': 50.539,
-    # 'th': 53.513,
+    'sw': 50.539,
+    'th': 53.513,
     'tr': 62.595,
     'ur': 58.583,
     'vi': 69.721,
@@ -135,8 +171,8 @@ ID_pruned = {
     'fr': 20000,
     'hi': 5000,
     'ru': 17000,
-    # 'sw': 500,
-    # 'th': 5000,
+    'sw': 500,
+    'th': 5000,
     'tr': 12000,
     'ur': 7000,
     'vi': 14000,
@@ -179,21 +215,28 @@ ID_hi = {
     'zh': 11000
 }
 
-ID_np = np.array(list(ID.values()))
+ID_np = np.array(list(ID_3.values()))
 ID_pruned_np = np.array(list(ID_pruned.values()))
+corpus_np = np.array(list(corpus.values()))
+baselines_np = np.array(list(baselines.values()))
 
 plt.figure(0)
 # plt.title('test acc vs prune fraction of mbert-base-256')
 plt.xlabel(r'ID ($d_{90}$) in log scale')
 plt.ylabel(r"corpus size (Wikisize)")
-plt.semilogx(ID_hi.values(), corpus.values(), 'bo')
+# plt.xticks(rotation=90)
+# ax = plt.gca()
+# plt.setp(ax.xaxis.get_minorticklabels(), rotation=50)
+plt.semilogx(ID_pruned.values(), corpus_np, 'bo')
+# for text in ax.get_xminorticklabels():
+#     text.set_rotation(50)
 
 for txt in corpus.keys():
-    plt.annotate(txt, (ID_hi[txt], corpus[txt]))
+    plt.annotate(txt, (ID_pruned[txt], corpus[txt]))
 
 plt.show()
 
 # print(list(ID_50_test.values()), type(ID_50_test.values()))
 # print(np.corrcoef(np.array(np.log(list(ID_50_test.values()))), np.array(list(baselines.values()))))
 # print(np.corrcoef(np.array(list(corpus.values())), np.array(list(ID.values()))))
-print(np.corrcoef(np.array(list(corpus.values())), np.log(np.array(list(ID_hi.values())))))
+print(np.corrcoef(corpus_np, np.log(np.array(list(ID_pruned.values())))))

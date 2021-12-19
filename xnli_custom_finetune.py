@@ -292,9 +292,12 @@ class DatasetBoi:
 
     def preprocess_data(self):
         # Preprocessing
-        train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        eval_dataset = self.eval_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        test_dataset = self.test_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+        train_dataset = self.train_dataset.filter(lambda example: example['label'] > 0)
+        eval_dataset = self.eval_dataset.filter(lambda example: example['label'] > 0)
+        test_dataset = self.test_dataset.filter(lambda example: example['label'] > 0)
+        train_dataset = train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+        eval_dataset = eval_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+        test_dataset = test_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
         train_dataset = self._format_input(train_dataset)
         eval_dataset = self._format_input(eval_dataset)
         test_dataset = self._format_input(test_dataset)
@@ -377,7 +380,6 @@ def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device
         ## Dont need to send inputs and labels to device while using parallel loader as they are already sent to the right device
         inputs = batch['input_ids'].to(device)
         labels = batch['label'].to(device)
-
         optimizer.zero_grad()
         outputs = model.forward(inputs)
         loss = loss_fn(outputs.logits, labels)
@@ -439,7 +441,7 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
             LR, ID=0, said=False, wandb_log=True, output_dir=None):
     said_str = "_SAID" if said else ''
-    run_name = f"{MODEL_NAME}_hi_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_hi_baseline_lr{LR}_ml{MAX_LENGTH}"
+    run_name = f"{MODEL_NAME}_en_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_en_baseline_lr{LR}_ml{MAX_LENGTH}"
     beta1, beta2 = 0.9, 0.999
     weight_decay, eps = 0.01, 1e-8
     scheduler_type = 'linear'
@@ -451,6 +453,7 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
     checkpoint = torch.load(os.path.join(MODEL_PATH))
     model = checkpoint['model_state_dict']
     print(f'done loading model on {device}')
+    model.trainable_stats()
 
     # Optimizer and LR scheduler
     optimizer = AdamW(model.parameters(), lr=LR, betas = (beta1,beta2), weight_decay=weight_decay, eps=eps)
@@ -477,7 +480,7 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'finetuned_on': "hi",
+            'finetuned_on': "en",
             'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
@@ -489,7 +492,7 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
         }
         run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
-    prev_val_acc, prev_epoch = -1, -1
+    prev_val_loss, prev_epoch = 1000000, -1
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
         epoch_time = time.time()
@@ -509,8 +512,8 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
 
         print(f"Total time taken for epoch {epoch+1}: {round(time.time()-epoch_time,4)}s\n")
 
-        if output_dir!=None and eval_acc > prev_val_acc:
-            prev_val_acc = eval_acc
+        if output_dir!=None and eval_loss < prev_val_loss:
+            prev_val_loss = eval_loss
             output_path = os.path.join(output_dir, run_name)
             if not os.path.exists(output_path):
                 os.makedirs(output_path)
@@ -524,13 +527,16 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
                 'scheduler_state_dict': lr_scheduler.state_dict(),
                 'epoch': epoch+1
             }, output_path)
-            if wandb_log:
-                artifact = wandb.Artifact(run_name, type='model')
-                artifact.add_file(output_path, name=f'epoch_{epoch+1}.pth')
-                run.log_artifact(artifact)
         
         if early_stop:
             break
+
+    if output_dir!=None and wandb_log:
+        output_path = os.path.join(output_dir, run_name)
+        output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
+        artifact = wandb.Artifact(run_name, type='model')
+        artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
+        run.log_artifact(artifact)
 
     del model
     torch.cuda.empty_cache()
@@ -541,7 +547,7 @@ def main_fn(MODEL_NAME, MODEL_PATH, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM
 MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "snli"
-CONFIG = "en"
+CONFIG = "plain_text"
 ID = 0
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
@@ -571,7 +577,7 @@ ID_lr_dict = {
     # 500000: 2e-4
 }
 
-for LR in [1e-5, 2e-5, 3e-5]:
-    main_fn(MODEL_NAME, "/home/indic-analysis/container/checkpoints_mbert_xnli_hi/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth",
+for LR in [2e-5, 3e-5, 4e-5]:
+    main_fn(MODEL_NAME, "/home/indic-analysis/container/checkpoints_mbert_xnli/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth",
             DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
             LR, int(ID), said=False, wandb_log=True, output_dir=None)
