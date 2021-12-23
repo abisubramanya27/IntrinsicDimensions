@@ -485,7 +485,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'finetuned_on': 'en',
+            'finetuned_on': 'hi',
             'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
@@ -542,8 +542,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         artifact = wandb.Artifact(run_name, type='model')
         artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
         run.log_artifact(artifact)
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        # if os.path.exists(output_path):
+        #     os.remove(output_path)
 
     del model
     torch.cuda.empty_cache()
@@ -565,49 +565,54 @@ LR = 1e-5
 FREEZE_FRACTION = 0
 
 # For finetuning after xnli finetuning
-# ID_lr_dict = {
-#     # 0: 1e-5,
-#     50: 8e-4,
-#     # 100: 8e-4,
-#     # 500: 8e-4,
-#     # 1000: 8e-4,
-#     # 2000: 8e-4,
-#     # 5000: 8e-4,
-#     # 10000: 8e-4,
-#     # 12000: 8e-4,
-#     # 15000: 8e-4,
-#     # 18000: 8e-4,
-#     # 20000: 8e-4,
-#     # 35000: 8e-4,
-#     # 50000: 8e-4,
-#     # 75000: 8e-4,
-#     # 100000: 8e-4,
-#     # 200000: 4e-5,
-#     # 500000: 2e-5
-# }
-
-# For mbert finetuning on xnli
 ID_lr_dict = {
-    # 0: 3e-5,
-    # 100: 1e-3,
-    # 500: 1e-3,
-    # 1000: 1e-3,
-    # 2000: 1e-3,
-    # 5000: 1e-3,
-    # 10000: 1e-3,
-    # 12000: 1e-3,
-    # 15000: 1e-3,
-    # 18000: 1e-3,
-    # 20000: 1e-3,
-    # 35000: 1e-3,
-    # 50000: 1e-3,
-    # 75000: 1e-3,
-    # 100000: 1e-3,
-    # 200000: 5e-4,
-    500000: 2e-4
+    # 0: 1e-5,
+    50: 8e-4,
+    # 100: 8e-4,
+    # 500: 8e-4,
+    # 1000: 8e-4,
+    # 2000: 8e-4,
+    # 5000: 8e-4,
+    # 10000: 8e-4,
+    # 12000: 8e-4,
+    # 15000: 8e-4,
+    # 18000: 8e-4,
+    # 20000: 8e-4,
+    # 35000: 8e-4,
+    # 50000: 8e-4,
+    # 75000: 8e-4,
+    # 100000: 8e-4,
+    # 200000: 4e-5,
+    # 500000: 2e-5
 }
 
-for ID in sorted(ID_lr_dict.keys()):
+# For mbert finetuning on xnli
+# ID_lr_dict = {
+#     0: 3e-5,
+#     100: 1e-3,
+#     500: 1e-3,
+#     1000: 1e-3,
+#     2000: 1e-3,
+#     5000: 1e-3,
+#     10000: 1e-3,
+#     12000: 1e-3,
+#     15000: 1e-3,
+#     18000: 1e-3,
+#     20000: 1e-3,
+#     35000: 1e-3,
+#     50000: 1e-3,
+#     75000: 1e-3,
+#     100000: 1e-3,
+#     200000: 5e-4,
+#     500000: 2e-4
+# }
+
+# DATASET = os.getenv("DATASET", "xnli")
+# CONFIG = os.getenv("CONFIG", "en")
+# output_dir = os.getenv("OUTPUT_DIR", "/home/indic-analysis/container/checkpoints_mbert_xnli_tmp/")
+# ID = int(os.getenv("ID", "0"))
+
+for ID in ID_lr_dict:
     main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_en_xnli_de/",
-            MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
+            ID_lr_dict[ID], int(ID), said=False, wandb_log=True, output_dir=None,
+            MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli_hi/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
