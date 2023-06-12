@@ -7,6 +7,7 @@ import numpy as np
 import math
 import torch
 import datasets
+import random
 from torch.utils.data import DataLoader
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch.nn as nn
@@ -27,6 +28,13 @@ import torch
 from torch.nn import functional as F
 from fwh_cuda import fast_walsh_hadamard_transform as fast_walsh_hadamard_transform_cuda
 
+def set_seed(val):
+    torch.manual_seed(val)
+    np.random.seed(val)
+    torch.cuda.manual_seed(val)
+    random.seed(val)
+
+set_seed(2022)
 
 ## Fastfood Wrapper
 class FastfoodWrap(nn.Module):
@@ -76,6 +84,8 @@ class FastfoodWrap(nn.Module):
                     param.clone().detach().requires_grad_(False).to(device)
                 )
 
+                set_seed(length)
+
                 # Generate fastfood parameters
                 DD = np.prod(v0.size())
                 self.fastfood_params[name] = fastfood_vars(DD, device)
@@ -94,6 +104,8 @@ class FastfoodWrap(nn.Module):
             
         # for name, base, localname in self.name_base_localname:
         #     delattr(base, localname)
+
+        set_seed(2022)
 
     def forward(self, x):
         index = 0
@@ -435,7 +447,7 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback=No
     return eval_loss, eval_acc, False
 
 # Function to perform zeroshot evaluation
-def zeroshot_fn(MODEL_NAME, DATASET, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_path, said=False):
+def zeroshot_fn(MODEL_NAME, DATASET, lang, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_path, said=False, ID_reqd=None):
     loss_fn = torch.nn.CrossEntropyLoss()
     device = torch.device('cuda')
 
@@ -447,22 +459,22 @@ def zeroshot_fn(MODEL_NAME, DATASET, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_
         ID = int(model_dir[model_dir.lower().index("id")+2 : model_dir.index("_", model_dir.lower().index("id")+1)]) \
                 if "id" in model_dir.lower() else 0
 
-        # if ID not in [10000, 12000, 15000, 18000]:
-        #     continue
+        if ID_reqd is not None and ID_reqd != ID:
+            continue
 
         LR = float(model_dir[model_dir.lower().index("lr")+2 : model_dir.index("_", model_dir.lower().index("lr")+1)])
-        PR = float(model_dir[model_dir.lower().index("pr")+2 : ])
+        # PR = float(model_dir[model_dir.lower().index("pr")+2 : ])
         said_str = "_SAID" if said else ''
         run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
         config = {
             'model_name': MODEL_NAME,
             'dataset': DATASET,
-            'language': CONFIG,
+            'language': lang,
             'batch_size': BATCH_SIZE,
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'prune_frac': PR,
+            # 'prune_frac': PR,
             'mode': 'DID' if not said else 'SAID',
             'lr_scheduler': 'linear',
             'optim': 'Adam',
@@ -472,7 +484,7 @@ def zeroshot_fn(MODEL_NAME, DATASET, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_
             'eps': 1e-8
         }
 
-        run = wandb.init(reinit=True, config=config, project=f'mbert-pruned-{DATASET}-en-{MAX_LENGTH}-zeroshot', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}-zeroshot', entity='iitm-id', name=run_name, resume=None)
 
         for file in sorted(os.listdir(os.path.join(output_path, model_dir))):
             if not ".pth" in file.lower():
@@ -508,7 +520,7 @@ def zeroshot_fn(MODEL_NAME, DATASET, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_
 MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "en"
+CONFIG = "de"
 ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
@@ -535,7 +547,17 @@ ID_lr_dict = {
     500000: 2e-4
 }
 
-for CONFIG in ['en', 'ar', 'bg', 'de', 'el', 'es', 'fr', 'hi', 'ru', 'sw', 'th', 'tr', 'ur', 'vi', 'zh']:
-    db = DatasetBoi(DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
-    zeroshot_fn(MODEL_NAME, DATASET, CONFIG, db, BATCH_SIZE, MAX_LENGTH,
-                output_path="/home/indic-analysis/container/checkpoints_mbert_pruned_xnli/", said=False)
+DATASET = os.getenv("DATASET", "xnli")
+CONFIG = os.getenv("CONFIG", "fr")
+output_dir = os.getenv("OUTPUT_DIR", "/home/indic-analysis/container/checkpoints_mbert_xnli_fr/")
+ID_reqd = int(os.getenv("ID", "0"))
+
+# DATASET = "xnli"
+# CONFIG = "hi"
+# output_dir = "/home/indic-analysis/container/checkpoints_bert_xnli_hi/"
+# ID_reqd = None
+
+for lang in ['en', 'ar', 'bg', 'de', 'el', 'es', 'fr', 'hi', 'ru', 'sw', 'th', 'tr', 'ur', 'vi', 'zh']:
+    db = DatasetBoi(DATASET, lang, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
+    zeroshot_fn(MODEL_NAME, DATASET, lang, CONFIG, db, BATCH_SIZE, MAX_LENGTH,
+                output_path=output_dir, said=False, ID_reqd=ID_reqd)

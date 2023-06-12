@@ -215,6 +215,13 @@ ID_hi = {
     'zh': 11000
 }
 
+ID_2_en = {
+    'hi': 450,
+    'de': 50,
+    'ar': 650,
+    'th': 6500,
+}
+
 ID_np = np.array(list(ID_3.values()))
 ID_pruned_np = np.array(list(ID_pruned.values()))
 corpus_np = np.array(list(corpus.values()))

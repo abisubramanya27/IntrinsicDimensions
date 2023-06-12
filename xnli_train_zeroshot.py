@@ -7,14 +7,19 @@ import numpy as np
 import math
 import torch
 import datasets
+import random
 from torch.utils.data import DataLoader
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import torch.nn as nn
 import importlib
 from transformers import AdamW
 from transformers import get_scheduler
-from torch.nn.utils import prune
 
+os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+os.environ['WANDB_MODE'] = 'offline'
+os.environ['WANDB_DIR'] = '/nlsasfs/home/ai4bharat/shubhamr/indic-analysis/'
+os.environ['HF_DATASETS_OFFLINE'] = '1'
+os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ["TOKENIZERS_PARALLELISM"] = 'true'
 import sys
 if '/home/indic-analysis/container/early-stopping-pytorch/' not in sys.path:
@@ -31,8 +36,13 @@ import torch
 from torch.nn import functional as F
 from fwh_cuda import fast_walsh_hadamard_transform as fast_walsh_hadamard_transform_cuda
 
-torch.manual_seed(2022)
-np.random.seed(2022)
+def set_seed(val):
+    torch.manual_seed(val)
+    np.random.seed(val)
+    torch.cuda.manual_seed(val)
+    random.seed(val)
+
+set_seed(2022)
 
 ## Fastfood Wrapper
 class FastfoodWrap(nn.Module):
@@ -56,11 +66,57 @@ class FastfoodWrap(nn.Module):
 
         # Fastfood parameters
         self.fastfood_params = {}
+        self.said = said
 
         # SAID
-        self.said = said
         self.said_size = len(list(module.named_parameters()))
-        if self.said:
+        if self.said == 1:
+            assert intrinsic_dimension > self.said_size
+            intrinsic_dimension -= self.said_size
+        
+        # HAID
+        self.level1 = {
+            'dense.weight': 0,
+            'dense.bias': 1,
+            'LayerNorm.weight': 2,
+            'LayerNorm.bias': 3,
+            'query.weight': 4,
+            'query.bias': 5,
+            'key.weight': 6,
+            'key.bias': 7,
+            'value.weight': 8,
+            'value.bias': 9,
+            'word_embeddings.weight': 10,
+            'position_embeddings.weight': 11,
+            'token_type_embeddings.weight': 12,
+            'classifier.weight': 13,
+            'classifier.bias': 14
+        }
+
+        self.level2 = {
+            'attention': 15,
+            'intermediate': 16,
+            'output': 17,
+            'bert.embeddings': 18,
+            'bert.pooler': 19
+        }
+
+        self.level3 = {
+            'bert.encoder.layer.0': 20,
+            'bert.encoder.layer.1': 21,
+            'bert.encoder.layer.2': 22,
+            'bert.encoder.layer.3': 23,
+            'bert.encoder.layer.4': 24,
+            'bert.encoder.layer.5': 25,
+            'bert.encoder.layer.6': 26,
+            'bert.encoder.layer.7': 27,
+            'bert.encoder.layer.8': 28,
+            'bert.encoder.layer.9': 29,
+            'bert.encoder.layer.10': 30,
+            'bert.encoder.layer.11': 31,
+        }
+        self.said_size = len(self.level1) + len(self.level2) + len(self.level3)
+        if self.said == 2:
             assert intrinsic_dimension > self.said_size
             intrinsic_dimension -= self.said_size
 
@@ -69,6 +125,7 @@ class FastfoodWrap(nn.Module):
         intrinsic_parameter = nn.Parameter(torch.zeros((intrinsic_dimension)).to(device))
         self.register_parameter("intrinsic_parameter", intrinsic_parameter)
         v_size = (intrinsic_dimension,)
+
 
         length = 0
         # Iterate over layers in the module
@@ -81,6 +138,8 @@ class FastfoodWrap(nn.Module):
                 self.initial_value[name] = v0 = (
                     param.clone().detach().requires_grad_(False).to(device)
                 )
+                
+                set_seed(length)
 
                 # Generate fastfood parameters
                 DD = np.prod(v0.size())
@@ -93,10 +152,16 @@ class FastfoodWrap(nn.Module):
                 self.name_base_localname.append((name, base, localname))
                 if "intrinsic_parameter" not in name:
                     param.requires_grad_(False)
-            
-        if said:
+
+        if said == 1:
             intrinsic_parameter_said = nn.Parameter(torch.ones((length)).to(device))
             self.register_parameter("intrinsic_parameter_said", intrinsic_parameter_said)
+
+        if said == 2:
+            intrinsic_parameter_said = nn.Parameter(torch.ones((self.said_size)).to(device))
+            self.register_parameter("intrinsic_parameter_said", intrinsic_parameter_said)
+        
+        set_seed(2020)
             
         # for name, base, localname in self.name_base_localname:
         #     delattr(base, localname)
@@ -109,12 +174,28 @@ class FastfoodWrap(nn.Module):
             init_shape = self.initial_value[name].size()
             DD = np.prod(init_shape)
 
-            # Fastfood transform te replace dence P
+            # Fastfood transform te replace dense P
             ray = fastfood_torched(self.intrinsic_parameter, DD, self.fastfood_params[name]).view(
                 init_shape
             )
+            if self.said == 2:
+                name_split = name.rsplit(".")
+                level1_ind =  self.level1['.'.join(name_split[-2:])]
+                level3_ind, level2_ind = -1, -1
+                if name.startswith('bert.encoder'):
+                    level3_ind = self.level3['bert.encoder.layer.'+name_split[3]]
+                    level2_ind = self.level2[name_split[4]]
+                elif name.startswith('bert.pooler') or name.startswith('bert.embeddings'):
+                    level2_ind = self.level2['.'.join(name_split[:2])]
+
             if self.said:
-                ray = ray * self.intrinsic_parameter_said[index]
+                ray = ray * self.intrinsic_parameter_said[index] if self.said == 1 \
+                        else ray * self.intrinsic_parameter_said[level1_ind] \
+                                 * (self.intrinsic_parameter_said[level2_ind] \
+                                    if level2_ind >= 0 else 1) \
+                                 * (self.intrinsic_parameter_said[level3_ind] \
+                                    if level3_ind >= 0 else 1)
+
             param = self.initial_value[name] + ray
 
             delattr(base, localname)
@@ -265,7 +346,8 @@ def fastfood_torched(x, DD, param_list=None, device=0):
 
 # Data
 class DatasetBoi:
-    def __init__(self, DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES=-1, NUM_EVAL_SAMPLES=-1,  NUM_TEST_SAMPLES=-1):
+    def __init__(self, DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES=-1, NUM_EVAL_SAMPLES=-1,  NUM_TEST_SAMPLES=-1, train=True):
+        self.train = train
         self.DATASET = DATASET
         self.CONFIG = CONFIG
         self.MODEL_NAME = MODEL_NAME
@@ -276,42 +358,54 @@ class DatasetBoi:
         self.NUM_TEST_SAMPLES = NUM_TEST_SAMPLES
 
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.train_dataset, self.eval_dataset, self.test_dataset = self.download_data()
-        self.train_dataset, self.eval_dataset, self.test_dataset = self.preprocess_data()
-        self.train_dataloader, self.eval_dataloader, self.test_dataloader = self.get_dataloaders()
+        if self.train:
+          self.train_dataset, self.eval_dataset, self.test_dataset = self.download_data()
+          self.train_dataset, self.eval_dataset, self.test_dataset = self.preprocess_data()
+          self.train_dataloader, self.eval_dataloader, self.test_dataloader = self.get_dataloaders()
+        else:
+          self.eval_dataset, self.test_dataset = self.download_data()
+          self.eval_dataset, self.test_dataset = self.preprocess_data()
+          self.eval_dataloader, self.test_dataloader = self.get_dataloaders()
 
     def download_data(self):
         # Download data
-        data = datasets.load_dataset(self.DATASET, self.CONFIG)
+        if self.train:
+          data = datasets.load_dataset(self.DATASET, self.CONFIG)
+          train_dataset = data['train'].select(range(self.NUM_TRAIN_SAMPLES)) if self.NUM_TRAIN_SAMPLES > 0 else data['train']
+          print('Training data length:', len(train_dataset))
+        else:
+          data = datasets.load_dataset(self.DATASET, self.CONFIG, split=['validation', 'test'])
+
         print(data)
-        train_dataset = data['train'].select(range(self.NUM_TRAIN_SAMPLES)) if self.NUM_TRAIN_SAMPLES > 0 else data['train']
-        print('Training data length:', len(train_dataset))
         eval_dataset = data['validation'].select(range(self.NUM_EVAL_SAMPLES)) if self.NUM_EVAL_SAMPLES > 0 else data['validation']
         print('Validation data length:', len(eval_dataset))
         test_dataset = data['test'].select(range(self.NUM_TEST_SAMPLES)) if self.NUM_TEST_SAMPLES > 0 else data['test']
         print('Test data length:', len(test_dataset))
 
-        return train_dataset, eval_dataset, test_dataset
+        return (train_dataset, eval_dataset, test_dataset) if self.train else (eval_dataset, test_dataset)
 
     def preprocess_data(self):
         # Preprocessing
-        train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+        if self.train:
+          train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
+          train_dataset = self._format_input(train_dataset)
+
         eval_dataset = self.eval_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
         test_dataset = self.test_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        train_dataset = self._format_input(train_dataset)
         eval_dataset = self._format_input(eval_dataset)
         test_dataset = self._format_input(test_dataset)
 
-        return train_dataset, eval_dataset, test_dataset
+        return (train_dataset, eval_dataset, test_dataset) if self.train else (eval_dataset, test_dataset)
 
 
     def get_dataloaders(self):
         # Dataloades
-        train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
+        if self.train:
+          train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
         eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
         test_dataloader = DataLoader(self.test_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
 
-        return train_dataloader, eval_dataloader, test_dataloader
+        return (train_dataloader, eval_dataloader, test_dataloader) if self.train else (eval_dataloader, test_dataloader)
 
     def _tokenize(self, batch):
         return self.tokenizer(batch['premise'], batch['hypothesis'], padding='max_length', truncation=True, max_length=self.MAX_LENGTH)
@@ -320,37 +414,21 @@ class DatasetBoi:
         dataset.set_format(type='torch', columns=['input_ids','label']) # Currently attention_mask and token_type_ids is being removed as fastfoodwrap accept>
         return dataset
 
-# Pruning Function
-def prune_model_global_unstructured(model, layer_type, proportion):
-    module_tups = []
-    for module in model.modules():
-        if isinstance(module, layer_type):
-            module_tups.append((module, 'weight'))
-
-    prune.global_unstructured(
-        parameters=module_tups, pruning_method=prune.L1Unstructured,
-        amount=proportion
-    )
-    for module, _ in module_tups:
-        prune.remove(module, 'weight')
-    return model
 
 # Model
 class ModelBoi(nn.Module):
-    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, prune=0, model=None):
+    def __init__(self, MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, model=None):
         super(ModelBoi,self).__init__()
         if model is None:
             self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=NUM_LABELS, output_loading_info=False)
         else:
-            self.model = model
+            self.model = model.model
         print("Before Freezing- ")
         trainable_params, layers = self.trainable_stats()
         print("After Freezing- ")
         self.freeze_layers(layers*FREEZE_FRACTION)
         trainable_params, layers = self.trainable_stats()
         self.model.to(device)
-        if prune > 0:
-            self.model = prune_model_global_unstructured(self.model, torch.nn.Linear, prune)
         if ID:
             self.model = FastfoodWrap(self.model, intrinsic_dimension=ID, said=said, device=device)
             # self.model = intrinsic_dimension(self.model, ID, set())
@@ -381,63 +459,6 @@ class ModelBoi(nn.Module):
     def forward(self,inputs):
         outputs = self.model.forward(inputs)
         return outputs
-
-# Data
-class DatasetBoi2:
-    def __init__(self, DATASET, CONFIG, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES=-1, NUM_EVAL_SAMPLES=-1,  NUM_TEST_SAMPLES=-1):
-        self.DATASET = DATASET
-        self.CONFIG = CONFIG
-        self.MODEL_NAME = MODEL_NAME
-        self.BATCH_SIZE = BATCH_SIZE
-        self.MAX_LENGTH = MAX_LENGTH
-        self.NUM_TRAIN_SAMPLES = NUM_TRAIN_SAMPLES
-        self.NUM_EVAL_SAMPLES = NUM_EVAL_SAMPLES
-        self.NUM_TEST_SAMPLES = NUM_TEST_SAMPLES
-
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        self.eval_dataset, self.test_dataset = self.download_data()
-        self.eval_dataset, self.test_dataset = self.preprocess_data()
-        self.eval_dataloader, self.test_dataloader = self.get_dataloaders()
-
-    def download_data(self):
-        # Download data
-        data = datasets.load_dataset(self.DATASET, self.CONFIG, split=['validation', 'test'])
-        print(data)
-        # train_dataset = data['train'].select(range(self.NUM_TRAIN_SAMPLES)) if self.NUM_TRAIN_SAMPLES > 0 else data['train']
-        # print('Training data length:', len(train_dataset))
-        eval_dataset = data[0].select(range(self.NUM_EVAL_SAMPLES)) if self.NUM_EVAL_SAMPLES > 0 else data[0]
-        print('Validation data length:', len(eval_dataset))
-        test_dataset = data[1].select(range(self.NUM_TEST_SAMPLES)) if self.NUM_TEST_SAMPLES > 0 else data[1]
-        print('Test data length:', len(test_dataset))
-
-        return eval_dataset, test_dataset
-
-    def preprocess_data(self):
-        # Preprocessing
-        # train_dataset = self.train_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        eval_dataset = self.eval_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        test_dataset = self.test_dataset.map(self._tokenize, batched=True, batch_size=self.BATCH_SIZE)
-        # train_dataset = self._format_input(train_dataset)
-        eval_dataset = self._format_input(eval_dataset)
-        test_dataset = self._format_input(test_dataset)
-
-        return eval_dataset, test_dataset
-
-
-    def get_dataloaders(self):
-        # Dataloades
-        # train_dataloader = DataLoader(self.train_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
-        eval_dataloader = DataLoader(self.eval_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
-        test_dataloader = DataLoader(self.test_dataset, batch_size=self.BATCH_SIZE, num_workers=15, drop_last=False)
-
-        return eval_dataloader, test_dataloader
-
-    def _tokenize(self, batch):
-        return self.tokenizer(batch['premise'], batch['hypothesis'], padding='max_length', truncation=True, max_length=self.MAX_LENGTH)
-    
-    def _format_input(self, dataset):
-        dataset.set_format(type='torch', columns=['input_ids','label']) # Currently attention_mask and token_type_ids is being removed as fastfoodwrap accept>
-        return dataset
 
 
 # Training Loop
@@ -488,7 +509,7 @@ def train_loop_fn(model, train_dataloader, optimizer, scheduler, loss_fn, device
     return train_loss, train_acc
 
 # Eval Loop
-def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
+def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback=None):
     model.eval()
     eval_loss = 0
     num_correct = 0
@@ -506,10 +527,10 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 
     eval_loss /= n_samples
     eval_acc = num_correct*100 / n_samples
-
+    
     if early_stop_callback:
         early_stop_callback(eval_loss, model)
-        if  early_stop_callback.early_stop:
+        if early_stop_callback.early_stop:
             print("Early stopping")
             return eval_loss, eval_acc, True
 
@@ -517,9 +538,9 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 
 # Main Function
 def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            LR, ID=0, said=False, prune=0, wandb_log=True, output_dir=None, MODEL_PATH=None):
-    said_str = "_SAID" if said else ''
-    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}_pr{prune}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}_pr{prune}"
+            LR, ID=0, said=False, wandb_log=True, output_dir=None, MODEL_PATH=None):
+    said_str = "_SAID" if said == 1 else "_HAID2" if said == 2 else ''
+    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
     beta1, beta2 = 0.9, 0.999
     weight_decay, eps = 0.01, 1e-8
     scheduler_type = 'linear'
@@ -530,17 +551,17 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     if MODEL_PATH is not None:
         checkpoint = torch.load(MODEL_PATH)
         model = checkpoint['model_state_dict']
-        # if ID > 0:
-        model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, prune, model)
+        if ID > 0:
+            model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, model)
     else:
-        model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, prune)
+        model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said)
     print(f'done loading model on {device}')
 
     # Optimizer and LR scheduler
     optimizer = AdamW(model.parameters(), lr=LR, betas = (beta1,beta2), weight_decay=weight_decay, eps=eps)
 
     # Callbacks
-    early_stop_callback = EarlyStopping.EarlyStopping(patience=3,delta=0)
+    early_stop_callback = EarlyStopping.EarlyStopping(patience=2,delta=0)
 
     warmup_steps = math.ceil(len(db.train_dataloader) * NUM_EPOCHS * 0.1)
     num_training_steps = NUM_EPOCHS * len(db.train_dataloader)
@@ -561,18 +582,17 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'max_length': MAX_LENGTH,
             'lr': LR,
             'ID': ID,
-            'finetuned_on': 'en',
-            'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
+            'finetuned_on': 'NIL',
+            'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID' if said == 1 else 'HAID2',
             'lr_scheduler': scheduler_type,
             'warmup_steps': warmup_steps,
             'optim': 'Adam',
             'beta1': beta1,
             'beta2': beta2,
             'weight_decay': weight_decay,
-            'eps': eps,
-            'prune_frac': prune
+            'eps': eps
         }
-        run = wandb.init(reinit=True, config=config, project=f'mbert-xnli-en-pruned-256', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
     prev_val_loss, prev_epoch = 100000, -1
     train_start = time.time()
@@ -594,15 +614,15 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
 
         print(f"Total time taken for epoch {epoch+1}: {round(time.time()-epoch_time,4)}s\n")
 
-        if output_dir!=None and eval_loss < prev_val_loss and ID == 0:
+        if output_dir!=None and eval_loss < prev_val_loss:
             prev_val_loss = eval_loss
-            output_path = os.path.join(output_dir, CONFIG, run_name)
+            output_path = os.path.join(output_dir, run_name)
             if not os.path.exists(output_path):
                 os.makedirs(output_path)
-            if os.path.exists(os.path.join(output_path, f'epoch_{prev_epoch}.pth')):
-                os.remove(os.path.join(output_path, f'epoch_{prev_epoch}.pth'))
+            if os.path.exists(os.path.join(output_path, f'best.pth')):
+                os.remove(os.path.join(output_path, f'best.pth'))
             prev_epoch = epoch+1
-            output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
+            output_path = os.path.join(output_path, f'best.pth')
             torch.save({
                 'model_state_dict': model,
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -612,26 +632,74 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         
         if early_stop:
             break
-        
-        # if output_dir!=None and wandb_log:
-        #     output_path = os.path.join(output_dir, run_name)
-        #     output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
-        #     artifact = wandb.Artifact(run_name, type='model')
-        #     artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
-        #     run.log_artifact(artifact)
-        #     # if os.path.exists(output_path):
-        #     #     os.remove(output_path)
+    
+    # if output_dir!=None and wandb_log:
+    #     output_path = os.path.join(output_dir, run_name)
+    #     output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
+    #     artifact = wandb.Artifact(run_name, type='model')
+    #     artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
+    #     run.log_artifact(artifact)
+    #     # if os.path.exists(output_path):
+    #     #     os.remove(output_path)
 
     del model
     torch.cuda.empty_cache()
     print(f"Total time taken: {round(time.time()-train_start,4)}s")
-    return
+    return run_name
+
+# Function to perform zeroshot evaluation
+def zeroshot_fn(model, MODEL_NAME, DATASET, lang, db, BATCH_SIZE, MAX_LENGTH, ID, LR, said=0):
+    loss_fn = torch.nn.CrossEntropyLoss()
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    # PR = float(model_dir[model_dir.lower().index("pr")+2 : ])
+    said_str = "_SAID" if said == 1 else "_HAID2" if said == 2 else ''
+    run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}"
+    config = {
+        'model_name': MODEL_NAME,
+        'dataset': DATASET,
+        'language': lang,
+        'batch_size': BATCH_SIZE,
+        'max_length': MAX_LENGTH,
+        'lr': LR,
+        'ID': ID,
+        'finetuned_on': 'NIL',
+        # 'prune_frac': PR,
+        'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID' if said == 1 else 'HAID2',
+        'lr_scheduler': 'linear',
+        'optim': 'Adam',
+        'beta1': 0.9,
+        'beta2': 0.999,
+        'weight_decay': 0.01,
+        'eps': 1e-8
+    }
+    run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-{MAX_LENGTH}-zeroshot', entity='iitm-id', name=run_name, resume=None)
+
+    eval_time = time.time()
+    eval_loss, eval_acc, _ = eval_loop_fn(model, db.eval_dataloader, device, loss_fn)
+    eval_end_time = time.time()
+    print(f"[{round(eval_end_time-eval_time,4)}s] Eval Loss: {eval_loss}\t\t Eval Accuracy: {eval_acc:.2f}%")
+    
+    test_time = time.time()
+    test_loss, test_acc, _ = eval_loop_fn(model, db.test_dataloader, device, loss_fn)
+    test_end_time = time.time()
+    print(f"[{round(test_end_time-test_time,4)}s] Test Loss: {test_loss}\t\t Test Accuracy: {test_acc:.2f}%\n\n")
+
+    # wandb.log({f"Eval Loss {epoch}": eval_loss, f"Eval Accuracy {epoch}": eval_acc, f"Test Loss {epoch}": test_loss, f"Test Accuracy {epoch}":test_acc})
+    wandb.log({"Eval Loss": eval_loss, "Eval Accuracy": eval_acc, "Test Loss": test_loss, "Test Accuracy": test_acc,
+                "Eval Time": round(eval_end_time-eval_time,4), "Test Time": round(test_end_time-test_time,4)})
+
+    wandb.finish()
+
+def load_best_model(path):
+  checkpoint = torch.load(MODEL_PATH)
+  return checkpoint['model_state_dict']
 
 # Config
 MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "ar"
+CONFIG = "fr"
 ID = 0
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
@@ -641,30 +709,70 @@ MAX_LENGTH = 256 # only 0.2 % of samples are > 256 size
 LR = 1e-5
 FREEZE_FRACTION = 0
 
+# For finetuning after xnli finetuning
 ID_lr_dict = {
-    0: 3e-5,
-    # 100: 1e-3,
-    # 500: 1e-3,
-    # 1000: 1e-3,
-    # 2000: 1e-3,
-    # 5000: 1e-3,
-    # 10000: 1e-3,
-    # 12000: 1e-3,
-    # 15000: 1e-3,
-    # 18000: 1e-3,
-    # 20000: 1e-3,
-    # 35000: 1e-3,
-    # 50000: 1e-3,
-    # 75000: 1e-3,
-    # 100000: 1e-3,
-    # 200000: 5e-4,
-    # 500000: 2e-4
+    # 0: 1e-5,
+    # 50: 8e-4,
+    # 100: 8e-4,
+    # 500: 8e-4,
+    # 1000: 8e-4,
+    # 2000: 8e-4,
+    # 5000: 8e-4,
+    # 10000: 8e-4,
+    # 12000: 8e-4,
+    # 15000: 8e-4,
+    # 18000: 8e-4,
+    # 20000: 8e-4,
+    # 35000: 8e-4,
+    # 50000: 8e-4,
+    # 75000: 8e-4,
+    # 100000: 8e-4,
+    # 200000: 4e-5,
+    # 500000: 2e-5
 }
 
-ID = 0
+# For mbert finetuning on xnli
+ID_lr_dict = {
+    0: 3e-5,
+    100: 1e-3,
+    500: 1e-3,
+    1000: 1e-3,
+    2000: 1e-3,
+    5000: 1e-3,
+    10000: 1e-3,
+    12000: 1e-3,
+    15000: 1e-3,
+    18000: 1e-3,
+    20000: 1e-3,
+    35000: 1e-3,
+    50000: 1e-3,
+    75000: 1e-3,
+    100000: 1e-3,
+    200000: 5e-4,
+    500000: 2e-4
+}
 
-# Prune knee point: 0.6
-for CONFIG in ['ar', 'de', 'hi', 'th']:
-    main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, prune=0.5, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_pruned_xnli_en/",
-            MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
+# DATASET = os.getenv("DATASET", "xnli")
+# CONFIG = os.getenv("CONFIG", "fr")
+# output_dir = os.getenv("OUTPUT_DIR", "/home/indic-analysis/container/checkpoints_mbert_xnli_fr/")
+# ID = int(os.getenv("ID", "0"))
+
+output_dir = "/nlsasfs/home/ai4bharat/shubhamr/indic-analysis/container/checkpoints_mbert_xnli_fr"
+
+for ID in [100000, 200000, 500000]:
+    set_seed(2022)
+    run_name = main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
+                       ID_lr_dict[int(ID)], int(ID), said=0, wandb_log=True, output_dir=output_dir)
+            #MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli_hi/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
+    model = load_best_model(os.path.join(output_dir, run_name, 'best.pth'))
+    for lang in ['en', 'ar', 'bg', 'de', 'el', 'es', 'fr', 'hi', 'ru', 'sw', 'th', 'tr', 'ur', 'vi', 'zh']:
+        db = DatasetBoi(DATASET, lang, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, train=False)
+        zeroshot_fn(model, MODEL_NAME, DATASET, lang, db, BATCH_SIZE, MAX_LENGTH, ID, LR, said=0)
+    
+    del model
+    torch.cuda.empty_cache()
+
+    if ID > 0 and os.path.exists(os.path.join(output_dir, run_name, 'best.pth')):
+        os.remove(os.path.join(output_dir, run_name, 'best.pth'))
+        os.rmdir(os.path.join(output_dir, run_name))
+

@@ -31,8 +31,6 @@ import torch
 from torch.nn import functional as F
 from fwh_cuda import fast_walsh_hadamard_transform as fast_walsh_hadamard_transform_cuda
 
-torch.manual_seed(2022)
-np.random.seed(2022)
 
 ## Fastfood Wrapper
 class FastfoodWrap(nn.Module):
@@ -350,7 +348,7 @@ class ModelBoi(nn.Module):
         trainable_params, layers = self.trainable_stats()
         self.model.to(device)
         if prune > 0:
-            self.model = prune_model_global_unstructured(self.model, torch.nn.Linear, prune)
+            prune_model_global_unstructured(self.model, torch.nn.Linear, prune)
         if ID:
             self.model = FastfoodWrap(self.model, intrinsic_dimension=ID, said=said, device=device)
             # self.model = intrinsic_dimension(self.model, ID, set())
@@ -515,6 +513,78 @@ def eval_loop_fn(model, eval_dataloader, device, loss_fn, early_stop_callback):
 
     return eval_loss, eval_acc, False
 
+# Function to perform zeroshot evaluation
+def zeroshot_fn(MODEL_NAME, DATASET, lang, CONFIG, db, BATCH_SIZE, MAX_LENGTH, output_path, said=False, prune=0, ID_reqd=None):
+    loss_fn = torch.nn.CrossEntropyLoss()
+    device = torch.device('cuda')
+
+    for model_dir in os.listdir(output_path):
+        said_file = model_dir.upper().endswith('SAID')
+        if not model_dir.startswith(MODEL_NAME) or (said ^ said_file):
+            continue
+        
+        ID = int(model_dir[model_dir.lower().index("id")+2 : model_dir.index("_", model_dir.lower().index("id")+1)]) \
+                if "id" in model_dir.lower() else 0
+
+        if ID_reqd is not None and ID_reqd != ID:
+            continue
+
+        LR = float(model_dir[model_dir.lower().index("lr")+2 : model_dir.index("_", model_dir.lower().index("lr")+1)])
+        # PR = float(model_dir[model_dir.lower().index("pr")+2 : ])
+        said_str = "_SAID" if said else ''
+        run_name = f"{MODEL_NAME}_ID{ID}_lr{LR}_ml{MAX_LENGTH}_pr{prune}"+said_str if ID>0 else f"{MODEL_NAME}_baseline_lr{LR}_ml{MAX_LENGTH}_pr{prune}"
+        config = {
+            'model_name': MODEL_NAME,
+            'dataset': DATASET,
+            'language': lang,
+            'batch_size': BATCH_SIZE,
+            'max_length': MAX_LENGTH,
+            'lr': LR,
+            'ID': ID,
+            'prune_frac': prune,
+            'mode': 'NIL' if ID == 0 else 'DID' if not said else 'SAID',
+            'lr_scheduler': 'linear',
+            'optim': 'Adam',
+            'beta1': 0.9,
+            'beta2': 0.999,
+            'weight_decay': 0.01,
+            'eps': 1e-8
+        }
+
+        run = wandb.init(reinit=True, config=config, project=f'mbert-{DATASET}-{CONFIG}-pruned-{MAX_LENGTH}-zeroshot', entity='iitm-id', name=run_name, resume=None)
+
+        for file in sorted(os.listdir(os.path.join(output_path, model_dir))):
+            if not ".pth" in file.lower() or not 'epoch_3' in file.lower():
+                continue
+            
+            start_time = time.time()
+            checkpoint = torch.load(os.path.join(output_path, model_dir, file))
+            print(f"[{round(time.time()-start_time,4)}s] Finished loading checkpoint")
+            model = checkpoint['model_state_dict']
+            epoch = checkpoint['epoch']
+            if prune > 0:
+                prune_model_global_unstructured(model, torch.nn.Linear, prune)
+
+            eval_time = time.time()
+            eval_loss, eval_acc, _ = eval_loop_fn(model, db.eval_dataloader, device, loss_fn, None)
+            eval_end_time = time.time()
+            print(f"[{round(eval_end_time-eval_time,4)}s] Epoch: {epoch}\t\t Eval Loss: {eval_loss}\t\t Eval Accuracy: {eval_acc:.2f}%")
+            
+            test_time = time.time()
+            test_loss, test_acc, _ = eval_loop_fn(model, db.test_dataloader, device, loss_fn, None)
+            test_end_time = time.time()
+            print(f"[{round(test_end_time-test_time,4)}s] Epoch: {epoch}\t\t Test Loss: {test_loss}\t\t Test Accuracy: {test_acc:.2f}%\n\n")
+
+            # wandb.log({f"Eval Loss {epoch}": eval_loss, f"Eval Accuracy {epoch}": eval_acc, f"Test Loss {epoch}": test_loss, f"Test Accuracy {epoch}":test_acc})
+            wandb.log({"Eval Loss": eval_loss, "Eval Accuracy": eval_acc, "Test Loss": test_loss, "Test Accuracy": test_acc,
+                       "Eval Time": round(eval_end_time-eval_time,4), "Test Time": round(test_end_time-test_time,4)})
+
+        wandb.finish()
+        del model
+        torch.cuda.empty_cache()
+
+    return
+
 # Main Function
 def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
             LR, ID=0, said=False, prune=0, wandb_log=True, output_dir=None, MODEL_PATH=None):
@@ -530,8 +600,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
     if MODEL_PATH is not None:
         checkpoint = torch.load(MODEL_PATH)
         model = checkpoint['model_state_dict']
-        # if ID > 0:
-        model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, prune, model)
+        if ID > 0:
+            model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, model)
     else:
         model = ModelBoi(MODEL_NAME, FREEZE_FRACTION, ID, NUM_LABELS, device, said, prune)
     print(f'done loading model on {device}')
@@ -572,9 +642,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
             'eps': eps,
             'prune_frac': prune
         }
-        run = wandb.init(reinit=True, config=config, project=f'mbert-xnli-en-pruned-256', entity='iitm-id', name=run_name, resume=None)
+        run = wandb.init(reinit=True, config=config, project=f'mbert-pruned-{DATASET}-{CONFIG}-{MAX_LENGTH}', entity='iitm-id', name=run_name, resume=None)
 
-    prev_val_loss, prev_epoch = 100000, -1
     train_start = time.time()
     for epoch in range(NUM_EPOCHS):
         epoch_time = time.time()
@@ -586,7 +655,7 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
         eval_loss, eval_acc, early_stop = eval_loop_fn(model, db.eval_dataloader, device, loss_fn, early_stop_callback)
         print(f"[{round(time.time()-eval_time,4)}s] Epoch elapsed: {epoch+1}\t\t Eval Loss: {eval_loss}\t\t Eval Accuracy: {eval_acc:.2f}%")
 
-        test_loss, test_acc, early_stop = eval_loop_fn(model, db.test_dataloader, device, loss_fn, None)
+        test_loss, test_acc, early_stop = eval_loop_fn(model, db.test_dataloader, device, loss_fn, early_stop_callback)
         print(f"[{round(time.time()-eval_time,4)}s] Epoch elapsed: {epoch+1}\t\t Test Loss: {test_loss}\t\t Test Accuracy: {test_acc:.2f}%")
 
         if wandb_log:
@@ -594,33 +663,24 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
 
         print(f"Total time taken for epoch {epoch+1}: {round(time.time()-epoch_time,4)}s\n")
 
-        if output_dir!=None and eval_loss < prev_val_loss and ID == 0:
-            prev_val_loss = eval_loss
-            output_path = os.path.join(output_dir, CONFIG, run_name)
+        if output_dir!=None and epoch == NUM_EPOCHS-1:
+            output_path = os.path.join(output_dir, run_name)
             if not os.path.exists(output_path):
                 os.makedirs(output_path)
-            if os.path.exists(os.path.join(output_path, f'epoch_{prev_epoch}.pth')):
-                os.remove(os.path.join(output_path, f'epoch_{prev_epoch}.pth'))
-            prev_epoch = epoch+1
-            output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
+            output_path = os.path.join(output_path, f'epoch_{epoch+1}.pth')
             torch.save({
                 'model_state_dict': model,
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': lr_scheduler.state_dict(),
                 'epoch': epoch+1
             }, output_path)
+            if wandb_log:
+                artifact = wandb.Artifact(run_name, type='model')
+                artifact.add_file(output_path, name=f'epoch_{epoch+1}.pth')
+                run.log_artifact(artifact)
         
         if early_stop:
             break
-        
-        # if output_dir!=None and wandb_log:
-        #     output_path = os.path.join(output_dir, run_name)
-        #     output_path = os.path.join(output_path, f'epoch_{prev_epoch}.pth')
-        #     artifact = wandb.Artifact(run_name, type='model')
-        #     artifact.add_file(output_path, name=f'epoch_{prev_epoch}.pth')
-        #     run.log_artifact(artifact)
-        #     # if os.path.exists(output_path):
-        #     #     os.remove(output_path)
 
     del model
     torch.cuda.empty_cache()
@@ -631,8 +691,8 @@ def main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPL
 MODEL_NAME = "bert-base-multilingual-cased" #"bert-base-cased"  #"albert-base-v2"  "distilbert-base-multilingual-cased"    "albert-large-v2" "prajjwal1/bert-tiny"
 NUM_LABELS = 3
 DATASET = "xnli"
-CONFIG = "ar"
-ID = 0
+CONFIG = "en"
+ID = 100
 NUM_TRAIN_SAMPLES = -1
 NUM_EVAL_SAMPLES = -1
 BATCH_SIZE = 80
@@ -642,7 +702,7 @@ LR = 1e-5
 FREEZE_FRACTION = 0
 
 ID_lr_dict = {
-    0: 3e-5,
+    # 0: 3e-5,
     # 100: 1e-3,
     # 500: 1e-3,
     # 1000: 1e-3,
@@ -654,17 +714,16 @@ ID_lr_dict = {
     # 18000: 1e-3,
     # 20000: 1e-3,
     # 35000: 1e-3,
-    # 50000: 1e-3,
-    # 75000: 1e-3,
-    # 100000: 1e-3,
-    # 200000: 5e-4,
-    # 500000: 2e-4
+    50000: 1e-3,
+    75000: 1e-3,
+    100000: 1e-3,
+    200000: 5e-4,
+    500000: 2e-4
 }
 
-ID = 0
-
 # Prune knee point: 0.6
-for CONFIG in ['ar', 'de', 'hi', 'th']:
-    main_fn(MODEL_NAME, DATASET, CONFIG, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES, NUM_LABELS, NUM_EPOCHS,
-            ID_lr_dict[ID], int(ID), said=False, prune=0.5, wandb_log=True, output_dir="/home/indic-analysis/container/checkpoints_mbert_pruned_xnli_en/",
-            MODEL_PATH="/home/indic-analysis/container/checkpoints_mbert_xnli/bert-base-multilingual-cased_baseline_lr3e-05_ml256/epoch_3.pth")
+for lang in ['ar', 'bg', 'de', 'el', 'es', 'fr', 'hi', 'ru', 'sw', 'th', 'tr', 'ur', 'vi', 'zh']:
+    db = DatasetBoi2(DATASET, lang, MODEL_NAME, BATCH_SIZE, MAX_LENGTH, NUM_TRAIN_SAMPLES, NUM_EVAL_SAMPLES)
+    for frac in [0.4, 0.5, 0.6]:
+        zeroshot_fn(MODEL_NAME, DATASET, lang, CONFIG, db, BATCH_SIZE, MAX_LENGTH,
+                    output_path="/home/indic-analysis/container/checkpoints_mbert_xnli/", said=False, prune=frac, ID_reqd=0)
